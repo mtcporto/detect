@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detecção de Objetos com Contagem Acumulativa</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <style>
+        #video { display: none; }
+        #canvas {
+            width: 100%;
+            max-width: 640px;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            display: block;
+            margin: 0 auto;
+        }
+        .container { max-width: 640px; }
+        .controls { margin-top: 15px; text-align: center; }
+        .confidence-label { margin: 10px 0; font-weight: bold; }
+        .counts-container {
+            display: flex;
+            justify-content: space-around;
+            margin-top: 20px;
+        }
+        .count-box {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            width: 48%;
+        }
+        .count-box h3 {
+            font-size: 1.2em;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .count-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .button-group {
+            margin-top: 15px;
+        }
+        .button-group button {
+            margin: 0 5px;
+        }
+    </style>
+</head>
+<body class="container mt-5">
+    <h1 class="text-center">Detecção de Objetos com Contagem Acumulativa</h1>
+    <div class="text-center">
+        <canvas id="canvas" willReadFrequently="true"></canvas>
+        <video id="video" autoplay playsinline></video>
+        <div class="controls">
+            <div class="confidence-label">Limiar de Confiança: <span id="confidenceValue">0.6</span></div>
+            <input type="range" id="confidenceThreshold" min="0" max="1" step="0.1" value="0.6" class="form-range">
+        </div>
+        
+        <div class="button-group">
+            <button id="resetCountsBtn" class="btn btn-warning">Zerar Contagem</button>
+            <button id="exportDataBtn" class="btn btn-primary">Exportar Dados</button>
+        </div>
+        
+        <div class="counts-container">
+            <div class="count-box">
+                <h3>Contagem no Quadro Atual:</h3>
+                <div id="currentCounts" class="count-list"></div>
+            </div>
+            <div class="count-box">
+                <h3>Contagem Acumulada:</h3>
+                <div id="totalCounts" class="count-list"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const canvas = document.getElementById('canvas');
+        const context = canvas.getContext('2d');
+        const video = document.getElementById('video');
+        const confidenceThreshold = document.getElementById('confidenceThreshold');
+        const confidenceValue = document.getElementById('confidenceValue');
+        const currentCountsDiv = document.getElementById('currentCounts');
+        const totalCountsDiv = document.getElementById('totalCounts');
+        const resetCountsBtn = document.getElementById('resetCountsBtn');
+        const exportDataBtn = document.getElementById('exportDataBtn');
+
+        let cocoModel = null;
+        let currentStream = null;
+        let isProcessing = false;
+        let totalObjectCounts = {}; // Armazena a contagem acumulativa
+        let trackedObjects = new Map(); // Para rastrear objetos entre quadros
+        let lastTrackedIds = new Set(); // IDs dos objetos vistos no último quadro
+        let nextObjectId = 1; // ID para rastrear objetos
+
+        // Tradução de objetos
+        const translations = {
+            "person": "pessoa",
+            "bicycle": "bicicleta",
+            "car": "carro",
+            "motorcycle": "motocicleta",
+            "airplane": "avião",
+            "bus": "ônibus",
+            "train": "trem",
+            "truck": "caminhão",
+            "boat": "barco",
+            "traffic light": "semáforo",
+            "fire hydrant": "hidrante",
+            "stop sign": "placa de pare",
+            "parking meter": "parquímetro",
+            "bench": "banco",
+            "bird": "pássaro",
+            "cat": "gato",
+            "dog": "cachorro",
+            "horse": "cavalo",
+            "sheep": "ovelha",
+            "cow": "vaca",
+            "elephant": "elefante",
+            "bear": "urso",
+            "zebra": "zebra",
+            "giraffe": "girafa",
+            "backpack": "mochila",
+            "umbrella": "guarda-chuva",
+            "handbag": "bolsa",
+            "tie": "gravata",
+            "suitcase": "mala",
+            "frisbee": "frisbee",
+            "skis": "esqui",
+            "snowboard": "snowboard",
+            "sports ball": "bola esportiva",
+            "kite": "pipa",
+            "baseball bat": "taco de beisebol",
+            "baseball glove": "luva de beisebol",
+            "skateboard": "skate",
+            "surfboard": "prancha de surf",
+            "tennis racket": "raquete de tênis",
+            "bottle": "garrafa",
+            "wine glass": "taça de vinho",
+            "cup": "xícara",
+            "fork": "garfo",
+            "knife": "faca",
+            "spoon": "colher",
+            "bowl": "tigela",
+            "banana": "banana",
+            "apple": "maçã",
+            "sandwich": "sanduíche",
+            "orange": "laranja",
+            "broccoli": "brócolis",
+            "carrot": "cenoura",
+            "hot dog": "cachorro-quente",
+            "pizza": "pizza",
+            "donut": "rosquinha",
+            "cake": "bolo",
+            "chair": "cadeira",
+            "couch": "sofá",
+            "potted plant": "planta em vaso",
+            "bed": "cama",
+            "dining table": "mesa de jantar",
+            "toilet": "vaso sanitário",
+            "tv": "TV",
+            "laptop": "laptop",
+            "mouse": "mouse",
+            "remote": "controle remoto",
+            "keyboard": "teclado",
+            "cell phone": "celular",
+            "microwave": "micro-ondas",
+            "oven": "forno",
+            "toaster": "torradeira",
+            "sink": "pia",
+            "refrigerator": "geladeira",
+            "book": "livro",
+            "clock": "relógio",
+            "vase": "vaso",
+            "scissors": "tesoura",
+            "teddy bear": "ursinho de pelúcia",
+            "hair drier": "secador de cabelo",
+            "toothbrush": "escova de dentes"
+        };
+
+        confidenceThreshold.addEventListener('input', (e) => {
+            confidenceValue.textContent = e.target.value;
+        });
+
+        resetCountsBtn.addEventListener('click', () => {
+            totalObjectCounts = {};
+            trackedObjects.clear();
+            lastTrackedIds.clear();
+            nextObjectId = 1;
+            updateCountDisplay();
+        });
+
+        exportDataBtn.addEventListener('click', () => {
+            const data = {
+                date: new Date().toLocaleString(),
+                totalCounts: {...totalObjectCounts}
+            };
+            
+            const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `contagem-objetos-${new Date().toISOString().slice(0,10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
+
+        async function startCamera() {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+
+            try {
+                const constraints = {
+                    video: {
+                        facingMode: "user",
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                };
+
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                currentStream = stream;
+
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    console.log(`Canvas dimensionado para: ${canvas.width}x${canvas.height}`);
+                };
+
+                return new Promise((resolve) => {
+                    video.onloadeddata = resolve;
+                });
+            } catch (err) {
+                console.error("Erro ao acessar a webcam: ", err);
+                alert('Erro ao acessar a câmera. Verifique as permissões.');
+            }
+        }
+
+        // Função para calcular o IOU (Intersection Over Union) entre duas caixas delimitadoras
+        function calculateIOU(box1, box2) {
+            const [x1, y1, width1, height1] = box1;
+            const [x2, y2, width2, height2] = box2;
+            
+            const xA = Math.max(x1, x2);
+            const yA = Math.max(y1, y2);
+            const xB = Math.min(x1 + width1, x2 + width2);
+            const yB = Math.min(y1 + height1, y2 + height2);
+            
+            // Área de interseção
+            const intersectionArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+            
+            // Áreas das duas caixas
+            const box1Area = width1 * height1;
+            const box2Area = width2 * height2;
+            
+            // Área de união
+            const unionArea = box1Area + box2Area - intersectionArea;
+            
+            return intersectionArea / unionArea;
+        }
+
+        // Função para rastrear objetos entre quadros
+        function trackObjects(predictions) {
+            const currentIds = new Set();
+            const threshold = 0.5; // Limiar para considerar o mesmo objeto
+            
+            for (const prediction of predictions) {
+                let matched = false;
+                
+                // Tenta associar com objetos existentes
+                for (const [id, obj] of trackedObjects.entries()) {
+                    if (prediction.class === obj.class && !currentIds.has(id)) {
+                        const iou = calculateIOU(prediction.bbox, obj.bbox);
+                        if (iou > threshold) {
+                            // Atualiza o objeto rastreado
+                            trackedObjects.set(id, {
+                                class: prediction.class,
+                                bbox: prediction.bbox,
+                                score: prediction.score,
+                                lastSeen: Date.now()
+                            });
+                            
+                            currentIds.add(id);
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // Se não houver correspondência, cria um novo objeto
+                if (!matched) {
+                    if (!lastTrackedIds.has(prediction.class)) {
+                        // Este objeto não estava presente no quadro anterior
+                        // Incrementa a contagem total
+                        totalObjectCounts[prediction.class] = (totalObjectCounts[prediction.class] || 0) + 1;
+                    }
+                    
+                    const id = `${prediction.class}_${nextObjectId++}`;
+                    trackedObjects.set(id, {
+                        class: prediction.class,
+                        bbox: prediction.bbox,
+                        score: prediction.score,
+                        lastSeen: Date.now()
+                    });
+                    
+                    currentIds.add(id);
+                }
+            }
+            
+            // Limpa objetos que não foram vistos recentemente
+            const now = Date.now();
+            for (const [id, obj] of trackedObjects.entries()) {
+                if (now - obj.lastSeen > 2000) { // 2 segundos sem ser visto
+                    trackedObjects.delete(id);
+                }
+            }
+            
+            // Atualiza o conjunto de classes vistas no quadro atual
+            lastTrackedIds = new Set(predictions.map(p => p.class));
+            
+            return currentIds;
+        }
+
+        function updateCountDisplay() {
+            // Contagem atual (no quadro)
+            const currentObjectCounts = {};
+            for (const obj of trackedObjects.values()) {
+                currentObjectCounts[obj.class] = (currentObjectCounts[obj.class] || 0) + 1;
+            }
+            
+            // Exibir contagem atual
+            let currentCountsHTML = '';
+            for (const className in currentObjectCounts) {
+                const translatedName = translations[className] || className;
+                currentCountsHTML += `<p>${translatedName}: ${currentObjectCounts[className]}</p>`;
+            }
+            currentCountsDiv.innerHTML = currentCountsHTML || '<p>Nenhum objeto detectado</p>';
+            
+            // Exibir contagem total acumulada
+            let totalCountsHTML = '';
+            const sortedClasses = Object.keys(totalObjectCounts).sort((a, b) => 
+                totalObjectCounts[b] - totalObjectCounts[a]
+            );
+            
+            for (const className of sortedClasses) {
+                const translatedName = translations[className] || className;
+                totalCountsHTML += `<p>${translatedName}: ${totalObjectCounts[className]}</p>`;
+            }
+            totalCountsDiv.innerHTML = totalCountsHTML || '<p>Nenhum objeto contado ainda</p>';
+        }
+
+        async function detectObjects() {
+            if (!cocoModel || isProcessing) {
+                requestAnimationFrame(detectObjects);
+                return;
+            }
+
+            isProcessing = true;
+
+            try {
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const predictions = await cocoModel.detect(canvas);
+
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                const threshold = parseFloat(confidenceThreshold.value);
+                const filteredPredictions = predictions.filter(pred => pred.score >= threshold);
+
+                // Rastrear objetos entre quadros
+                trackObjects(filteredPredictions);
+                
+                // Atualizar exibição de contagem
+                updateCountDisplay();
+
+                // Desenhar caixas e rótulos
+                for (const prediction of filteredPredictions) {
+                    const [x, y, width, height] = prediction.bbox;
+                    let label = translations[prediction.class] || prediction.class;
+                    const confidence = Math.round(prediction.score * 100);
+
+                    context.strokeStyle = `hsl(${confidence * 3.6}, 100%, 50%)`;
+                    context.lineWidth = 4;
+                    context.strokeRect(x, y, width, height);
+
+                    const gradient = context.createLinearGradient(x, y, x + width, y);
+                    gradient.addColorStop(0, 'rgba(0, 0, 0, 0.8)');
+                    gradient.addColorStop(1, 'rgba(0, 0, 0, 0.6)');
+                    context.fillStyle = gradient;
+
+                    context.font = "bold 24px Arial";
+                    const textWidth = context.measureText(`${label} ${confidence}%`).width;
+                    const textHeight = 30;
+                    const padding = 8;
+
+                    context.fillRect(
+                        x,
+                        y > textHeight ? y - textHeight - padding : y + height,
+                        textWidth + padding * 2,
+                        textHeight + padding
+                    );
+
+                    context.shadowColor = 'black';
+                    context.shadowBlur = 4;
+                    context.fillStyle = "white";
+                    context.fillText(
+                        `${label} ${confidence}%`,
+                        x + padding,
+                        y > textHeight ? y - padding : y + height + textHeight
+                    );
+                    context.shadowBlur = 0;
+                }
+
+            } catch (error) {
+                console.error("Erro na detecção:", error);
+            }
+
+            isProcessing = false;
+            requestAnimationFrame(detectObjects);
+        }
+
+        async function init() {
+            try {
+                cocoModel = await cocoSsd.load({ base: 'mobilenet_v2' });
+                console.log('Modelo COCO-SSD carregado!');
+                await startCamera();
+                detectObjects();
+            } catch (error) {
+                console.error("Erro ao inicializar:", error);
+                alert('Erro ao inicializar: ' + error.message);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
